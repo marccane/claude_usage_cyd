@@ -1,28 +1,58 @@
 // ui.cpp — LVGL widgets. Three tabs (Usage / Limits / Info), colour-coded bars
-// that mirror claude_usage.py's green/amber/red thresholds, and touch controls.
+// that mirror claude_usage.py's green/amber/red thresholds, touch controls, and
+// a light/dark theme toggle (persisted in NVS).
+//
+// Theming: text + bar-track colours come from two shared lv_style_t objects, so
+// switching themes is just "update the style + report change". Backgrounds are
+// set directly on the few container objects.
 #include <lvgl.h>
 #include <math.h>
 #include <time.h>
+#include <Preferences.h>
 
 #include "ui.h"
 #include "config.h"
 #include "display.h"
 
-// One usage row: title + bar + "42%  2h5m" info label.
 typedef struct {
   lv_obj_t *info;
   lv_obj_t *bar;
 } meter_t;
 
 static meter_t m_five, m_seven, m_opus, m_sonnet, m_extra;
-static lv_obj_t *lbl_header;     // "Ada / Acme Inc"
-static lv_obj_t *lbl_limits;     // rate-limit dump
-static lv_obj_t *lbl_user, *lbl_org, *lbl_updated, *lbl_next, *lbl_net,
-    *lbl_state;
-static lv_obj_t *slider_bri;
+static lv_obj_t *lbl_header, *lbl_limits;
+static lv_obj_t *lbl_user, *lbl_org, *lbl_updated, *lbl_next, *lbl_net, *lbl_state,
+    *lbl_fw;
+static lv_obj_t *slider_bri, *sw_dark;
+static lv_obj_t *s_tv, *s_page_usage, *s_page_limits, *s_page_info;
+static lv_style_t s_style_text;   // primary text colour (themed, inherited by labels)
+static lv_style_t s_style_track;  // bar track colour (themed)
+static bool s_dark = false;
 static volatile bool s_refreshRequested = false;
 
+// ---- theme persistence ------------------------------------------------------
+static bool loadDarkPref() {
+  Preferences p;
+  p.begin(NVS_NAMESPACE, true);
+  bool d = p.getBool("dark", false);
+  p.end();
+  return d;
+}
+static void saveDarkPref(bool d) {
+  Preferences p;
+  p.begin(NVS_NAMESPACE, false);
+  p.putBool("dark", d);
+  p.end();
+}
+
 // ---- helpers ----------------------------------------------------------------
+static void styleText(lv_obj_t *l) { lv_obj_add_style(l, &s_style_text, 0); }
+
+static void themeBg(lv_obj_t *o, lv_color_t bg) {
+  lv_obj_set_style_bg_color(o, bg, 0);
+  lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+}
+
 static lv_color_t barColor(float p) {
   if (p < PCT_AMBER) return lv_color_hex(0x35C759);  // green
   if (p < PCT_RED) return lv_color_hex(0xFFCC00);    // amber
@@ -43,48 +73,43 @@ static void fmtReset(long s, char *out, size_t n) {
   }
 }
 
-static meter_t makeMeter(lv_obj_t *parent, const char *name) {
-  meter_t mt;
-  lv_obj_t *c = lv_obj_create(parent);
-  lv_obj_set_size(c, lv_pct(100), 56);
-  lv_obj_set_style_pad_all(c, 6, 0);
-  lv_obj_set_style_border_width(c, 0, 0);
-  lv_obj_set_style_bg_opa(c, LV_OPA_TRANSP, 0);
-  lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+// ---- theming ----------------------------------------------------------------
+static void applyTheme(bool dark) {
+  lv_color_t bg = dark ? lv_color_hex(0x15151A) : lv_color_white();
+  lv_color_t text = dark ? lv_color_hex(0xF0F0F0) : lv_color_black();
+  lv_color_t tabbar = dark ? lv_color_hex(0x26262E) : lv_color_hex(0xE6E6E6);
+  lv_color_t border = dark ? lv_color_hex(0x3C3C46) : lv_color_hex(0xBFBFBF);
+  lv_color_t track = dark ? lv_color_hex(0x3A3A44) : lv_color_hex(0xD2D2D2);
+  lv_color_t accent = dark ? lv_color_hex(0xFFB000) : lv_color_hex(0xC75B00);
+  lv_color_t dim = lv_color_hex(0x8A8A8A);
 
-  lv_obj_t *title = lv_label_create(c);
-  lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
-  lv_obj_set_style_text_color(title, lv_color_black(), 0);
-  lv_label_set_text(title, name);
+  // Shared styles -> refresh every object that uses them.
+  lv_style_set_text_color(&s_style_text, text);
+  lv_style_set_bg_color(&s_style_track, track);
+  lv_obj_report_style_change(&s_style_text);
+  lv_obj_report_style_change(&s_style_track);
 
-  mt.info = lv_label_create(c);
-  lv_obj_align(mt.info, LV_ALIGN_TOP_RIGHT, 0, 0);
-  lv_obj_set_style_text_font(mt.info, &lv_font_montserrat_20, 0);
-  lv_obj_set_style_text_color(mt.info, lv_color_black(), 0);
-  lv_label_set_text(mt.info, "--");
+  // Backgrounds.
+  themeBg(lv_scr_act(), bg);
+  themeBg(s_tv, bg);
+  themeBg(lv_tabview_get_content(s_tv), bg);
+  themeBg(s_page_usage, bg);
+  themeBg(s_page_limits, bg);
+  themeBg(s_page_info, bg);
 
-  mt.bar = lv_bar_create(c);
-  lv_obj_set_size(mt.bar, lv_pct(100), 14);
-  lv_obj_align(mt.bar, LV_ALIGN_BOTTOM_MID, 0, 0);
-  lv_bar_set_range(mt.bar, 0, 100);
-  lv_bar_set_value(mt.bar, 0, LV_ANIM_OFF);
-  lv_obj_set_style_bg_color(mt.bar, lv_color_hex(0x333333), LV_PART_MAIN);
-  return mt;
-}
+  // Tab bar: distinct fill + a divider line under it, so the selection zone is
+  // clearly separated from the content.
+  lv_obj_t *bar = lv_tabview_get_tab_btns(s_tv);
+  themeBg(bar, tabbar);
+  lv_obj_set_style_border_color(bar, border, 0);
+  lv_obj_set_style_border_width(bar, 2, 0);
+  lv_obj_set_style_border_side(bar, LV_BORDER_SIDE_BOTTOM, 0);
+  lv_obj_set_style_text_color(bar, text, LV_PART_ITEMS);
+  lv_obj_set_style_text_color(bar, accent, LV_PART_ITEMS | LV_STATE_CHECKED);
 
-static void setMeter(meter_t &mt, bool present, float util, long resets) {
-  if (!present) {
-    lv_label_set_text(mt.info, "n/a");
-    lv_bar_set_value(mt.bar, 0, LV_ANIM_OFF);
-    return;
-  }
-  int v = (int)lroundf(util);
-  lv_bar_set_value(mt.bar, v, LV_ANIM_OFF);
-  lv_obj_set_style_bg_color(mt.bar, barColor(util), LV_PART_INDICATOR);
-  char rs[24];
-  fmtReset(resets, rs, sizeof(rs));
-  lv_label_set_text_fmt(mt.info, "%d%%   %s", v, rs);
+  // Accent / dim labels (local styles override the shared text style).
+  if (lbl_state) lv_obj_set_style_text_color(lbl_state, accent, 0);
+  if (lbl_fw) lv_obj_set_style_text_color(lbl_fw, dim, 0);
 }
 
 // ---- event callbacks --------------------------------------------------------
@@ -105,10 +130,61 @@ static void bri_save_evt(lv_event_t *e) {
   displaySaveBrightness();
 }
 
+static void dark_evt(lv_event_t *e) {
+  s_dark = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+  applyTheme(s_dark);
+  saveDarkPref(s_dark);
+}
+
 bool uiTakeRefreshRequest() {
   bool r = s_refreshRequested;
   s_refreshRequested = false;
   return r;
+}
+
+// ---- meter rows -------------------------------------------------------------
+static meter_t makeMeter(lv_obj_t *parent, const char *name) {
+  meter_t mt;
+  lv_obj_t *c = lv_obj_create(parent);
+  lv_obj_set_size(c, lv_pct(100), 56);
+  lv_obj_set_style_pad_all(c, 6, 0);
+  lv_obj_set_style_border_width(c, 0, 0);
+  lv_obj_set_style_bg_opa(c, LV_OPA_TRANSP, 0);
+  lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *title = lv_label_create(c);
+  lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
+  styleText(title);
+  lv_label_set_text(title, name);
+
+  mt.info = lv_label_create(c);
+  lv_obj_align(mt.info, LV_ALIGN_TOP_RIGHT, 0, 0);
+  lv_obj_set_style_text_font(mt.info, &lv_font_montserrat_20, 0);
+  styleText(mt.info);
+  lv_label_set_text(mt.info, "--");
+
+  mt.bar = lv_bar_create(c);
+  lv_obj_set_size(mt.bar, lv_pct(100), 14);
+  lv_obj_align(mt.bar, LV_ALIGN_BOTTOM_MID, 0, 0);
+  lv_bar_set_range(mt.bar, 0, 100);
+  lv_bar_set_value(mt.bar, 0, LV_ANIM_OFF);
+  lv_obj_add_style(mt.bar, &s_style_track, LV_PART_MAIN);
+  return mt;
+}
+
+static void setMeter(meter_t &mt, bool present, float util, long resets) {
+  if (!present) {
+    lv_label_set_text(mt.info, "n/a");
+    lv_bar_set_value(mt.bar, 0, LV_ANIM_OFF);
+    return;
+  }
+  int v = (int)lroundf(util);
+  lv_bar_set_value(mt.bar, v, LV_ANIM_OFF);
+  lv_obj_set_style_bg_color(mt.bar, barColor(util), LV_PART_INDICATOR);
+  char rs[24];
+  fmtReset(resets, rs, sizeof(rs));
+  lv_label_set_text_fmt(mt.info, "%d%%   %s", v, rs);
 }
 
 // ---- tab builders -----------------------------------------------------------
@@ -118,7 +194,7 @@ static void buildUsageTab(lv_obj_t *tab) {
 
   lbl_header = lv_label_create(tab);
   lv_obj_set_style_text_font(lbl_header, &lv_font_montserrat_14, 0);
-  lv_obj_set_style_text_color(lbl_header, lv_color_black(), 0);
+  styleText(lbl_header);
   lv_label_set_text(lbl_header, "Claude.ai usage");
 
   m_five = makeMeter(tab, "5-hour");
@@ -133,7 +209,7 @@ static void buildLimitsTab(lv_obj_t *tab) {
   lv_label_set_long_mode(lbl_limits, LV_LABEL_LONG_WRAP);
   lv_obj_set_width(lbl_limits, lv_pct(100));
   lv_obj_set_style_text_font(lbl_limits, &lv_font_montserrat_14, 0);
-  lv_obj_set_style_text_color(lbl_limits, lv_color_black(), 0);
+  styleText(lbl_limits);
   lv_label_set_text(lbl_limits, "Rate limits load with usage.");
 }
 
@@ -141,7 +217,7 @@ static lv_obj_t *infoRow(lv_obj_t *tab, const char *prefix) {
   lv_obj_t *l = lv_label_create(tab);
   lv_obj_set_width(l, lv_pct(100));
   lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
-  lv_obj_set_style_text_color(l, lv_color_black(), 0);
+  styleText(l);
   lv_label_set_text(l, prefix);
   return l;
 }
@@ -156,7 +232,6 @@ static void buildInfoTab(lv_obj_t *tab) {
   lbl_updated = infoRow(tab, "Updated: never");
   lbl_next = infoRow(tab, "Next: --");
   lbl_state = infoRow(tab, "");
-  lv_obj_set_style_text_color(lbl_state, lv_color_hex(0xC75B00), 0);
 
   lv_obj_t *btn = lv_btn_create(tab);
   lv_obj_add_event_cb(btn, refresh_evt, LV_EVENT_CLICKED, nullptr);
@@ -164,8 +239,7 @@ static void buildInfoTab(lv_obj_t *tab) {
   lv_label_set_text(bl, LV_SYMBOL_REFRESH " Refresh now");
   lv_obj_center(bl);
 
-  lv_obj_t *brow = infoRow(tab, LV_SYMBOL_SETTINGS " Brightness");
-  (void)brow;
+  infoRow(tab, LV_SYMBOL_SETTINGS " Brightness");
   slider_bri = lv_slider_create(tab);
   lv_obj_set_width(slider_bri, lv_pct(100));
   lv_slider_set_range(slider_bri, 8, 255);
@@ -174,29 +248,38 @@ static void buildInfoTab(lv_obj_t *tab) {
   lv_obj_add_event_cb(slider_bri, bri_save_evt, LV_EVENT_RELEASED, nullptr);
   lv_obj_add_event_cb(slider_bri, bri_save_evt, LV_EVENT_PRESS_LOST, nullptr);
 
-  lv_obj_t *fw = lv_label_create(tab);
-  lv_obj_set_style_text_color(fw, lv_color_hex(0x666666), 0);
-  lv_obj_set_style_text_font(fw, &lv_font_montserrat_12, 0);
-  lv_label_set_text(fw, FW_VERSION);
+  infoRow(tab, "Dark theme");
+  sw_dark = lv_switch_create(tab);
+  lv_obj_add_event_cb(sw_dark, dark_evt, LV_EVENT_VALUE_CHANGED, nullptr);
+
+  lbl_fw = lv_label_create(tab);
+  lv_obj_set_style_text_font(lbl_fw, &lv_font_montserrat_12, 0);
+  lv_label_set_text(lbl_fw, FW_VERSION);
 }
 
 // ---- public -----------------------------------------------------------------
 void uiInit() {
-  lv_obj_t *scr = lv_scr_act();
-  lv_obj_set_style_bg_color(scr, lv_color_white(), 0);
+  lv_style_init(&s_style_text);
+  lv_style_init(&s_style_track);
+  lv_style_set_bg_opa(&s_style_track, LV_OPA_COVER);
 
-  lv_obj_t *tv = lv_tabview_create(scr, LV_DIR_TOP, 34);
-  lv_obj_set_style_bg_color(tv, lv_color_white(), 0);
+  s_tv = lv_tabview_create(lv_scr_act(), LV_DIR_TOP, 36);
 
-  buildUsageTab(lv_tabview_add_tab(tv, LV_SYMBOL_BARS " Usage"));
-  buildLimitsTab(lv_tabview_add_tab(tv, LV_SYMBOL_LIST " Limits"));
-  buildInfoTab(lv_tabview_add_tab(tv, LV_SYMBOL_SETTINGS " Info"));
+  s_page_usage = lv_tabview_add_tab(s_tv, LV_SYMBOL_BARS " Usage");
+  buildUsageTab(s_page_usage);
+  s_page_limits = lv_tabview_add_tab(s_tv, LV_SYMBOL_LIST " Limits");
+  buildLimitsTab(s_page_limits);
+  s_page_info = lv_tabview_add_tab(s_tv, LV_SYMBOL_SETTINGS " Info");
+  buildInfoTab(s_page_info);
+
+  s_dark = loadDarkPref();
+  if (s_dark) lv_obj_add_state(sw_dark, LV_STATE_CHECKED);
+  applyTheme(s_dark);
 }
 
 void uiUpdate(const UsageData &d) {
   if (d.org_name[0] || d.name[0])
-    lv_label_set_text_fmt(lbl_header, "%s  -  %s",
-                          d.name[0] ? d.name : "?",
+    lv_label_set_text_fmt(lbl_header, "%s  -  %s", d.name[0] ? d.name : "?",
                           d.org_name[0] ? d.org_name : "?");
 
   setMeter(m_five, d.five_hour.present, d.five_hour.util, d.five_hour.resets_in);
@@ -214,7 +297,6 @@ void uiUpdate(const UsageData &d) {
     lv_label_set_text(m_extra.info, "off");
   }
 
-  // Limits tab text.
   if (d.n_limits > 0) {
     String t;
     char last[40] = "";
