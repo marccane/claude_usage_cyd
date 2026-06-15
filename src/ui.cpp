@@ -15,6 +15,7 @@
 #include "display.h"
 
 typedef struct {
+  lv_obj_t *cont;
   lv_obj_t *info;
   lv_obj_t *bar;
 } meter_t;
@@ -23,7 +24,7 @@ static meter_t m_five, m_seven, m_opus, m_sonnet, m_extra;
 static lv_obj_t *lbl_header, *lbl_limits;
 static lv_obj_t *lbl_user, *lbl_org, *lbl_updated, *lbl_next, *lbl_net, *lbl_state,
     *lbl_fw;
-static lv_obj_t *slider_bri, *sw_dark;
+static lv_obj_t *slider_bri, *sw_dark, *sw_bars;
 static lv_obj_t *s_tv, *s_page_usage, *s_page_limits, *s_page_info;
 static lv_style_t s_style_text;   // primary text colour (themed, inherited by labels)
 static lv_style_t s_style_track;  // bar track colour (themed)
@@ -43,6 +44,33 @@ static void saveDarkPref(bool d) {
   p.begin(NVS_NAMESPACE, false);
   p.putBool("dark", d);
   p.end();
+}
+
+static bool loadBarsPref() {
+  Preferences p;
+  p.begin(NVS_NAMESPACE, true);
+  bool b = p.getBool("bars", true);  // detail bars shown by default
+  p.end();
+  return b;
+}
+static void saveBarsPref(bool b) {
+  Preferences p;
+  p.begin(NVS_NAMESPACE, false);
+  p.putBool("bars", b);
+  p.end();
+}
+
+// Show/hide the Opus, Sonnet and Extra-$ rows (hidden rows drop out of the
+// flex layout, so the remaining bars reflow up).
+static void setDetailBarsVisible(bool v) {
+  lv_obj_t *conts[3] = {m_opus.cont, m_sonnet.cont, m_extra.cont};
+  for (int i = 0; i < 3; i++) {
+    if (!conts[i]) continue;
+    if (v)
+      lv_obj_clear_flag(conts[i], LV_OBJ_FLAG_HIDDEN);
+    else
+      lv_obj_add_flag(conts[i], LV_OBJ_FLAG_HIDDEN);
+  }
 }
 
 // ---- helpers ----------------------------------------------------------------
@@ -136,6 +164,17 @@ static void dark_evt(lv_event_t *e) {
   saveDarkPref(s_dark);
 }
 
+static void bars_evt(lv_event_t *e) {
+  bool v = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
+  setDetailBarsVisible(v);
+  saveBarsPref(v);
+}
+
+static void flip_evt(lv_event_t *e) {
+  (void)e;
+  displayFlip();
+}
+
 bool uiTakeRefreshRequest() {
   bool r = s_refreshRequested;
   s_refreshRequested = false;
@@ -151,6 +190,7 @@ static meter_t makeMeter(lv_obj_t *parent, const char *name) {
   lv_obj_set_style_border_width(c, 0, 0);
   lv_obj_set_style_bg_opa(c, LV_OPA_TRANSP, 0);
   lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+  mt.cont = c;
 
   lv_obj_t *title = lv_label_create(c);
   lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
@@ -252,6 +292,16 @@ static void buildInfoTab(lv_obj_t *tab) {
   sw_dark = lv_switch_create(tab);
   lv_obj_add_event_cb(sw_dark, dark_evt, LV_EVENT_VALUE_CHANGED, nullptr);
 
+  infoRow(tab, "Detail bars (Opus / Sonnet / $)");
+  sw_bars = lv_switch_create(tab);
+  lv_obj_add_event_cb(sw_bars, bars_evt, LV_EVENT_VALUE_CHANGED, nullptr);
+
+  lv_obj_t *flipbtn = lv_btn_create(tab);
+  lv_obj_add_event_cb(flipbtn, flip_evt, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t *fl = lv_label_create(flipbtn);
+  lv_label_set_text(fl, LV_SYMBOL_LOOP " Flip screen 180");
+  lv_obj_center(fl);
+
   lbl_fw = lv_label_create(tab);
   lv_obj_set_style_text_font(lbl_fw, &lv_font_montserrat_12, 0);
   lv_label_set_text(lbl_fw, FW_VERSION);
@@ -275,6 +325,10 @@ void uiInit() {
   s_dark = loadDarkPref();
   if (s_dark) lv_obj_add_state(sw_dark, LV_STATE_CHECKED);
   applyTheme(s_dark);
+
+  bool barsOn = loadBarsPref();
+  if (barsOn) lv_obj_add_state(sw_bars, LV_STATE_CHECKED);
+  setDetailBarsVisible(barsOn);
 }
 
 void uiUpdate(const UsageData &d) {

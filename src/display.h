@@ -15,5 +15,8 @@ uint8_t displayGetBrightness();
 void displayLoadBrightness();
 void displaySaveBrightness();
 
+// Toggle the screen 180° (swaps rotation 1<->3), redraw, and persist to NVS.
+void displayFlip();
+
 // Raw LDR reading (0..4095) for auto-brightness experiments.
 int displayReadLDR();

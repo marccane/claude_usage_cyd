@@ -21,6 +21,7 @@ static SPIClass touchSPI(VSPI);
 static XPT2046_Touchscreen ts(XPT2046_CS, XPT2046_IRQ);
 
 static uint8_t s_brightness = BL_DEFAULT;
+static uint8_t s_rotation = TFT_ROTATION;
 
 // LVGL draw buffer: 40 lines tall. 320*40*2 = ~25 KB of internal RAM.
 static lv_disp_draw_buf_t draw_buf;
@@ -75,6 +76,27 @@ void displaySaveBrightness() {
   p.end();
 }
 
+static void displayLoadRotation() {
+  Preferences p;
+  p.begin(NVS_NAMESPACE, true);
+  uint8_t r = p.getUChar("rot", TFT_ROTATION);
+  p.end();
+  s_rotation = (r == 1 || r == 3) ? r : TFT_ROTATION;
+}
+
+static void displaySetRotation(uint8_t rot) {
+  s_rotation = rot;
+  tft.setRotation(rot);
+  ts.setRotation(rot);
+  Preferences p;
+  p.begin(NVS_NAMESPACE, false);
+  p.putUChar("rot", rot);
+  p.end();
+  lv_obj_invalidate(lv_scr_act());  // force a full redraw in the new orientation
+}
+
+void displayFlip() { displaySetRotation(s_rotation == 3 ? 1 : 3); }
+
 int displayReadLDR() { return analogRead(LDR_PIN); }
 
 void displayInit() {
@@ -87,7 +109,8 @@ void displayInit() {
   digitalWrite(LED_B, HIGH);
 
   tft.begin();
-  tft.setRotation(TFT_ROTATION);
+  displayLoadRotation();
+  tft.setRotation(s_rotation);
 
   // Backlight PWM — set up AFTER tft.begin(), which drives TFT_BL HIGH as a
   // plain GPIO and would otherwise detach our LEDC channel from the pin
@@ -100,7 +123,7 @@ void displayInit() {
   // Touch on its own bus: SCLK, MISO, MOSI, CS.
   touchSPI.begin(XPT2046_CLK, XPT2046_MISO, XPT2046_MOSI, XPT2046_CS);
   ts.begin(touchSPI);
-  ts.setRotation(TFT_ROTATION);
+  ts.setRotation(s_rotation);
 
   lv_init();
   lv_disp_draw_buf_init(&draw_buf, buf, nullptr, SCREEN_W * 40);
