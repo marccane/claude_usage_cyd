@@ -78,15 +78,23 @@ Then:
 ```bash
 cd ~/projects/claude_usage_cyd
 cp src/secrets.h.example src/secrets.h     # already created — edit WiFi creds
-$EDITOR src/secrets.h
+$EDITOR src/secrets.h                       # list one or more networks (see below)
 pio run -t upload && pio device monitor
 ```
 
 First build downloads the ESP32 toolchain (~1 GB) and takes a few minutes.
 
+### WiFi
+`secrets.h` holds a list of networks (`WIFI_CREDS`). On boot and after any drop
+the device scans, then connects to whichever of your listed networks has the
+strongest signal in range — so a phone hotspot, home, and office can all coexist.
+Order doesn't matter; selection is by signal strength. If none are reachable it
+keeps rescanning (`No known WiFi - retrying`) until one shows up.
+
 ### First-run flow
 1. Flash the firmware and open the monitor.
-2. It connects to WiFi, syncs time (NTP, UTC), and reports `no token in NVS`.
+2. It scans, connects to the strongest known WiFi, syncs time (NTP, UTC), and
+   reports `no token in NVS`.
 3. From the PC: `claude_token_push.py --serial --refresh`.
 4. The CYD stores the blob, fetches usage, and the bars appear. The token
    survives reboots (NVS) — you only push again when it expires.
