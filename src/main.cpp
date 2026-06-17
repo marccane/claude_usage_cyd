@@ -54,40 +54,32 @@ static void requestFetch() {
   }
 }
 
-// ---- WiFi (non-blocking, multi-AP) ------------------------------------------
-// A blocking connect/scan would starve pollSerial() and the touch UI whenever
-// an AP is down, so we drive a small state machine: kick off an *async* scan,
-// pick the strongest WIFI_CREDS entry that's actually in range, then poll
-// WiFi.begin()'s status. On failure or a dropped link we rescan from scratch,
-// so the device roams to whichever known network is currently available.
+// ---- WiFi (multi-AP) --------------------------------------------------------
+// On boot and after a drop we scan, pick the strongest WIFI_CREDS entry that's
+// actually in range, then poll WiFi.begin()'s status (which is non-blocking).
+// The scan itself is SYNCHRONOUS: arduino-esp32 2.0.x's async scan
+// (scanNetworks(true)) returns 0 results on this build even though the radio is
+// fine, so we take the ~2 s blocking hit. It only happens while disconnected
+// (nothing is animating then), and we paint the "Scanning…" frame first.
 static bool s_wifiUp = false;
 
-enum WifiPhase { WIFI_IDLE, WIFI_SCANNING, WIFI_CONNECTING };
+enum WifiPhase { WIFI_IDLE, WIFI_CONNECTING };
 static WifiPhase s_wifiPhase = WIFI_IDLE;
 static unsigned long s_wifiPhaseMs = 0;
 
-static const unsigned long WIFI_SCAN_STUCK_MS = 15000;  // restart a hung scan
-static const unsigned long WIFI_RESCAN_GAP_MS = 5000;   // pause between rounds
+static const unsigned long WIFI_RESCAN_GAP_MS = 3000;   // pause between rounds
 
-// Round-robin cursor for the blind fallback (used when the scan doesn't surface
-// any of our SSIDs — e.g. a hidden network the scan won't name).
+// Round-robin cursor for the blind fallback (used if the scan can't name any of
+// our SSIDs — e.g. a hidden network or a momentary scan miss).
 static size_t s_blindIdx = 0;
-
-static void wifiStartScan() {
-  WiFi.scanDelete();
-  // show_hidden=true so hidden APs are at least counted; passive=false.
-  WiFi.scanNetworks(true /* async */, true /* show_hidden */);
-  s_wifiPhase = WIFI_SCANNING;
-  s_wifiPhaseMs = millis();
-  uiSetState("Scanning WiFi...");
-}
 
 static void wifiBegin() {
   WiFi.mode(WIFI_STA);
   WiFi.persistent(false);
   WiFi.setAutoReconnect(false);  // we manage (re)connection via the scan loop
   WiFi.disconnect();
-  wifiStartScan();
+  s_wifiPhase = WIFI_IDLE;
+  s_wifiPhaseMs = millis() - WIFI_RESCAN_GAP_MS - 1;  // scan on the first tick
 }
 
 // Of the APs the scan found, return the index into WIFI_CREDS of the strongest
@@ -107,7 +99,41 @@ static int wifiPickKnown(int found) {
   return best;
 }
 
-// Call ~1x/s. Never blocks. Fetches once the link comes up; rescans if it drops.
+// Blocking: scan, choose the best known AP (or blind-try one), kick off connect.
+static void wifiScanAndConnect() {
+  uiSetState("Scanning WiFi...");
+  lv_timer_handler();                       // paint the frame before we block
+  int found = WiFi.scanNetworks(false /* sync */, false /* show_hidden */);
+  if (found < 0) found = 0;                 // WIFI_SCAN_FAILED -> nothing
+
+  // Log everything the radio saw — quickest way to spot a 5 GHz-only AP
+  // (invisible to the ESP32) or an SSID typo.
+  Serial.printf("WiFi: scan found %d AP(s):\n", found);
+  for (int i = 0; i < found; i++) {
+    String s = WiFi.SSID(i);
+    Serial.printf("  %2d) rssi=%4d  ch=%2d  %s\n", i, WiFi.RSSI(i),
+                  WiFi.channel(i), s.length() ? s.c_str() : "<hidden>");
+  }
+
+  int k = wifiPickKnown(found);
+  WiFi.scanDelete();
+  if (k < 0) {
+    // None of our SSIDs were named in the scan. Don't give up — blind-try each
+    // credential in turn (covers hidden SSIDs and momentary scan misses).
+    k = (int)(s_blindIdx % WIFI_CRED_COUNT);
+    s_blindIdx++;
+    Serial.printf("WiFi: no listed SSID in scan; blind try %s\n",
+                  WIFI_CREDS[k].ssid);
+  } else {
+    Serial.printf("WiFi: connecting to %s\n", WIFI_CREDS[k].ssid);
+  }
+  uiSetState((String("Connecting ") + WIFI_CREDS[k].ssid).c_str());
+  WiFi.begin(WIFI_CREDS[k].ssid, WIFI_CREDS[k].pass);
+  s_wifiPhase = WIFI_CONNECTING;
+  s_wifiPhaseMs = millis();
+}
+
+// Call ~1x/s. Fetches once the link comes up; rescans if it drops or times out.
 static void wifiTick() {
   bool up = (WiFi.status() == WL_CONNECTED);
   if (up != s_wifiUp) {
@@ -120,57 +146,24 @@ static void wifiTick() {
       if (claudeHasToken()) requestFetch();
     } else {
       Serial.println("WiFi lost");
-      wifiStartScan();
+      s_wifiPhase = WIFI_IDLE;
+      s_wifiPhaseMs = millis();
     }
   }
   if (up) return;
 
   switch (s_wifiPhase) {
-    case WIFI_SCANNING: {
-      int found = WiFi.scanComplete();
-      if (found == WIFI_SCAN_RUNNING) {
-        if (millis() - s_wifiPhaseMs > WIFI_SCAN_STUCK_MS) wifiStartScan();
-        break;
-      }
-      if (found < 0) found = 0;  // WIFI_SCAN_FAILED -> treat as "nothing found"
-
-      // Log everything the radio actually saw — the quickest way to spot a
-      // 5 GHz-only AP (invisible to the ESP32), a typo, or a hidden SSID.
-      Serial.printf("WiFi: scan found %d AP(s):\n", found);
-      for (int i = 0; i < found; i++) {
-        String s = WiFi.SSID(i);
-        Serial.printf("  %2d) rssi=%4d  ch=%2d  %s\n", i, WiFi.RSSI(i),
-                      WiFi.channel(i), s.length() ? s.c_str() : "<hidden>");
-      }
-
-      int k = wifiPickKnown(found);
-      WiFi.scanDelete();
-      if (k < 0) {
-        // None of our SSIDs were named in the scan. Don't give up — blind-try
-        // each credential in turn (covers hidden SSIDs and flaky scans).
-        k = (int)(s_blindIdx % WIFI_CRED_COUNT);
-        s_blindIdx++;
-        Serial.printf("WiFi: no listed SSID in scan; blind try %s\n",
-                      WIFI_CREDS[k].ssid);
-      } else {
-        Serial.printf("WiFi: connecting to %s\n", WIFI_CREDS[k].ssid);
-      }
-      uiSetState((String("Connecting ") + WIFI_CREDS[k].ssid).c_str());
-      WiFi.begin(WIFI_CREDS[k].ssid, WIFI_CREDS[k].pass);
-      s_wifiPhase = WIFI_CONNECTING;
-      s_wifiPhaseMs = millis();
-      break;
-    }
     case WIFI_CONNECTING:
       if (millis() - s_wifiPhaseMs > WIFI_TIMEOUT_MS) {
         Serial.println("WiFi: connect timed out, rescanning");
         WiFi.disconnect();
-        wifiStartScan();
+        s_wifiPhase = WIFI_IDLE;
+        s_wifiPhaseMs = millis();
       }
       break;
     case WIFI_IDLE:
     default:
-      if (millis() - s_wifiPhaseMs > WIFI_RESCAN_GAP_MS) wifiStartScan();
+      if (millis() - s_wifiPhaseMs > WIFI_RESCAN_GAP_MS) wifiScanAndConnect();
       break;
   }
 }
