@@ -154,6 +154,10 @@ Easy next steps:
 
 ## Notes & caveats
 
+> See **[QUIRKS.md](QUIRKS.md)** for the full list of landmines: the two auth
+> sources and why `main` only has one, the OAuth rate limit, the LVGL `%f`
+> panic, serial-protocol races, and debugging recipes.
+
 - **Cloudflare (direct mode):** `cf_clearance` is bound to the original client's
   IP and TLS fingerprint. The ESP32's TLS handshake differs from Firefox, so
   claude.ai's bot-management *may* return `403` even with a valid token. If that
