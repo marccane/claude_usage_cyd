@@ -149,6 +149,14 @@ Easy next steps:
 
 ## Notes & caveats
 
+- **Rate limit (`code`/oauth source):** `api.anthropic.com/api/oauth/usage` is
+  rate-limited per account and answers `429` with `retry-after: ~195` once you
+  lean on it. `REFRESH_MS` is 180 s, so the CYD polls *just* inside that window,
+  and every `claude_token_export.py`/`_push.py` run spends another call on its
+  verify step (`--no-verify` skips it). Running `claudeUsageWatch` (also 180 s)
+  against the same account at the same time doubles the rate and both start
+  showing `429`. `STATUS` reports it as `http=429 err=usage HTTP 429`. The
+  `browser` source talks to claude.ai instead and is not subject to this limit.
 - **Cloudflare (direct mode):** `cf_clearance` is bound to the original client's
   IP and TLS fingerprint. The ESP32's TLS handshake differs from Firefox, so
   claude.ai's bot-management *may* return `403` even with a valid token. If that
