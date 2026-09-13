@@ -20,7 +20,7 @@ typedef struct {
   lv_obj_t *bar;
 } meter_t;
 
-static meter_t m_five, m_seven, m_opus, m_sonnet, m_extra;
+static meter_t m_five, m_seven, m_extra;
 static lv_obj_t *lbl_header, *lbl_limits;
 static lv_obj_t *lbl_user, *lbl_org, *lbl_updated, *lbl_next, *lbl_net, *lbl_state,
     *lbl_fw;
@@ -60,17 +60,14 @@ static void saveBarsPref(bool b) {
   p.end();
 }
 
-// Show/hide the Opus, Sonnet and Extra-$ rows (hidden rows drop out of the
-// flex layout, so the remaining bars reflow up).
+// Show/hide the extra-credits row (a hidden row drops out of the flex layout,
+// so the bars above it reflow down).
 static void setDetailBarsVisible(bool v) {
-  lv_obj_t *conts[3] = {m_opus.cont, m_sonnet.cont, m_extra.cont};
-  for (int i = 0; i < 3; i++) {
-    if (!conts[i]) continue;
-    if (v)
-      lv_obj_clear_flag(conts[i], LV_OBJ_FLAG_HIDDEN);
-    else
-      lv_obj_add_flag(conts[i], LV_OBJ_FLAG_HIDDEN);
-  }
+  if (!m_extra.cont) return;
+  if (v)
+    lv_obj_clear_flag(m_extra.cont, LV_OBJ_FLAG_HIDDEN);
+  else
+    lv_obj_add_flag(m_extra.cont, LV_OBJ_FLAG_HIDDEN);
 }
 
 // ---- helpers ----------------------------------------------------------------
@@ -262,9 +259,7 @@ static void buildUsageTab(lv_obj_t *tab) {
 
   m_five = makeMeter(tab, "5-hour");
   m_seven = makeMeter(tab, "7-day");
-  m_opus = makeMeter(tab, "Opus 7d");
-  m_sonnet = makeMeter(tab, "Sonnet 7d");
-  m_extra = makeMeter(tab, "Extra $");
+  m_extra = makeMeter(tab, "Extra EUR");
 }
 
 static void buildLimitsTab(lv_obj_t *tab) {
@@ -315,7 +310,7 @@ static void buildInfoTab(lv_obj_t *tab) {
   sw_dark = lv_switch_create(tab);
   lv_obj_add_event_cb(sw_dark, dark_evt, LV_EVENT_VALUE_CHANGED, nullptr);
 
-  infoRow(tab, "Detail bars (Opus / Sonnet / $)");
+  infoRow(tab, "Extra credits bar");
   sw_bars = lv_switch_create(tab);
   lv_obj_add_event_cb(sw_bars, bars_evt, LV_EVENT_VALUE_CHANGED, nullptr);
 
@@ -364,8 +359,6 @@ void uiUpdate(const UsageData &d) {
 
   setMeter(m_five, d.five_hour.present, d.five_hour.util, d.five_hour.resets_in);
   setMeter(m_seven, d.seven_day.present, d.seven_day.util, d.seven_day.resets_in);
-  setMeter(m_opus, d.opus.present, d.opus.util, d.opus.resets_in);
-  setMeter(m_sonnet, d.sonnet.present, d.sonnet.util, d.sonnet.resets_in);
 
   if (d.extra.enabled) {
     setMeter(m_extra, true, d.extra.util < 0 ? 0 : d.extra.util, -1);
@@ -375,7 +368,7 @@ void uiUpdate(const UsageData &d) {
       // reads a bogus vararg -> LoadProhibited. Format with libc instead.
       char buf[40];
       if (d.extra.total > 0)
-        snprintf(buf, sizeof(buf), "%.2f/%.2f %s", d.extra.used, d.extra.total,
+        snprintf(buf, sizeof(buf), "%.2f/%.0f %s", d.extra.used, d.extra.total,
                  d.extra.currency);
       else  // oauth /usage reports monthly_limit=null: no total to show
         snprintf(buf, sizeof(buf), "%.2f %s", d.extra.used, d.extra.currency);

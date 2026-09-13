@@ -132,8 +132,9 @@ own SPI bus — pins in `config.h`.)
 Three swipeable tabs:
 
 - **Usage** — colour-coded bars (green <60 %, amber <85 %, red ≥85 %, same as the
-  script) for the 5-hour, 7-day, Opus-7d, Sonnet-7d windows and the extra-usage
-  `€` budget, each with its reset countdown.
+  script) for the 5-hour and 7-day windows plus the extra-credits budget, each
+  with its reset countdown. The per-model Opus/Sonnet bars were dropped; the
+  extra-credits row can be hidden from *Info*.
 - **Limits** — per-model-group rate limits (`tier_model_rate_limiters`).
 - **Info** — user/org, WiFi+IP, last-update time, next-refresh countdown, a
   **Refresh now** button and a **brightness** slider. Firmware version at the bottom.

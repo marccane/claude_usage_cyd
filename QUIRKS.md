@@ -273,5 +273,11 @@ than waiting for the real endpoint to rate-limit you, and it costs no quota.
   `resetInSeconds()` returns `-1` until the clock syncs (`now < 1700000000`).
 - No PSRAM on this ESP32-WROOM — the LVGL draw buffer is sized for internal RAM.
 - The blob lives in NVS and survives reboots; you only re-push when it expires.
+- **LVGL's built-in fonts have no `€`.** The Montserrat cmaps cover ASCII plus
+  only `°`, `•` and the FontAwesome icons — U+20AC is absent, so a label set to
+  "Extra €" renders a blank/placeholder glyph with no warning at build or run
+  time. Hence the row says `Extra EUR`, and the amount uses the payload's
+  `currency` string. Getting the real symbol means regenerating a font subset
+  with `lv_font_conv`, not a config flag.
 - `scripts/__pycache__/` appears whenever `claude_token_push.py` imports the
   exporter. It is untracked noise; leave it or add it to `.gitignore`.
