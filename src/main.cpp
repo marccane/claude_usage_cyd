@@ -131,12 +131,14 @@ static void handleLine(String line) {
     }
 
   } else if (line.startsWith("STATUS")) {
-    Serial.printf("STATUS wifi=%d ip=%s org=%s last=%s fetching=%d\n",
+    Serial.printf("STATUS wifi=%d ip=%s org=%s last=%s fetching=%d http=%d err=%s\n",
                   WiFi.status() == WL_CONNECTED ? 1 : 0,
                   WiFi.localIP().toString().c_str(),
                   claudeOrgName(),
                   g_result.valid ? "ok" : (g_result.error[0] ? "err" : "never"),
-                  g_fetching ? 1 : 0);
+                  g_fetching ? 1 : 0,
+                  g_result.http_status,
+                  g_result.error[0] ? g_result.error : "-");
 
   } else if (line.startsWith("REFRESH")) {
     requestFetch();
