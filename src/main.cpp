@@ -54,36 +54,117 @@ static void requestFetch() {
   }
 }
 
-// ---- WiFi (non-blocking) ----------------------------------------------------
-// A blocking connect would starve pollSerial() and the touch UI whenever the AP
-// is down, so we kick off WiFi.begin() and just poll status from loop().
+// ---- WiFi (multi-AP) --------------------------------------------------------
+// On boot and after a drop we scan, pick the strongest WIFI_CREDS entry that's
+// actually in range, then poll WiFi.begin()'s status (which is non-blocking).
+// The scan itself is SYNCHRONOUS: arduino-esp32 2.0.x's async scan
+// (scanNetworks(true)) returns 0 results on this build even though the radio is
+// fine, so we take the ~2 s blocking hit. It only happens while disconnected
+// (nothing is animating then), and we paint the "Scanning…" frame first.
 static bool s_wifiUp = false;
-static unsigned long s_wifiAttemptMs = 0;
+
+enum WifiPhase { WIFI_IDLE, WIFI_CONNECTING };
+static WifiPhase s_wifiPhase = WIFI_IDLE;
+static unsigned long s_wifiPhaseMs = 0;
+
+static const unsigned long WIFI_RESCAN_GAP_MS = 3000;   // pause between rounds
+
+// Round-robin cursor for the blind fallback (used if the scan can't name any of
+// our SSIDs — e.g. a hidden network or a momentary scan miss).
+static size_t s_blindIdx = 0;
 
 static void wifiBegin() {
   WiFi.mode(WIFI_STA);
   WiFi.persistent(false);
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  s_wifiAttemptMs = millis();
+  WiFi.setAutoReconnect(false);  // we manage (re)connection via the scan loop
+  WiFi.disconnect();
+  s_wifiPhase = WIFI_IDLE;
+  s_wifiPhaseMs = millis() - WIFI_RESCAN_GAP_MS - 1;  // scan on the first tick
 }
 
-// Call ~1x/s. Never blocks. Fetches once the link comes up; retries if it drops.
+// Of the APs the scan found, return the index into WIFI_CREDS of the strongest
+// one we have a password for, or -1 if none of our networks are in range.
+static int wifiPickKnown(int found) {
+  int best = -1, bestRssi = -9999;
+  for (int i = 0; i < found; i++) {
+    String ssid = WiFi.SSID(i);
+    int rssi = WiFi.RSSI(i);
+    for (size_t k = 0; k < WIFI_CRED_COUNT; k++) {
+      if (ssid == WIFI_CREDS[k].ssid && rssi > bestRssi) {
+        bestRssi = rssi;
+        best = (int)k;
+      }
+    }
+  }
+  return best;
+}
+
+// Blocking: scan, choose the best known AP (or blind-try one), kick off connect.
+static void wifiScanAndConnect() {
+  uiSetState("Scanning WiFi...");
+  lv_timer_handler();                       // paint the frame before we block
+  int found = WiFi.scanNetworks(false /* sync */, false /* show_hidden */);
+  if (found < 0) found = 0;                 // WIFI_SCAN_FAILED -> nothing
+
+  // Log everything the radio saw — quickest way to spot a 5 GHz-only AP
+  // (invisible to the ESP32) or an SSID typo.
+  Serial.printf("WiFi: scan found %d AP(s):\n", found);
+  for (int i = 0; i < found; i++) {
+    String s = WiFi.SSID(i);
+    Serial.printf("  %2d) rssi=%4d  ch=%2d  %s\n", i, WiFi.RSSI(i),
+                  WiFi.channel(i), s.length() ? s.c_str() : "<hidden>");
+  }
+
+  int k = wifiPickKnown(found);
+  WiFi.scanDelete();
+  if (k < 0) {
+    // None of our SSIDs were named in the scan. Don't give up — blind-try each
+    // credential in turn (covers hidden SSIDs and momentary scan misses).
+    k = (int)(s_blindIdx % WIFI_CRED_COUNT);
+    s_blindIdx++;
+    Serial.printf("WiFi: no listed SSID in scan; blind try %s\n",
+                  WIFI_CREDS[k].ssid);
+  } else {
+    Serial.printf("WiFi: connecting to %s\n", WIFI_CREDS[k].ssid);
+  }
+  uiSetState((String("Connecting ") + WIFI_CREDS[k].ssid).c_str());
+  WiFi.begin(WIFI_CREDS[k].ssid, WIFI_CREDS[k].pass);
+  s_wifiPhase = WIFI_CONNECTING;
+  s_wifiPhaseMs = millis();
+}
+
+// Call ~1x/s. Fetches once the link comes up; rescans if it drops or times out.
 static void wifiTick() {
   bool up = (WiFi.status() == WL_CONNECTED);
   if (up != s_wifiUp) {
     s_wifiUp = up;
     uiSetNet(up, up ? WiFi.localIP().toString() : String(""));
     if (up) {
-      Serial.printf("WiFi connected: %s\n", WiFi.localIP().toString().c_str());
+      Serial.printf("WiFi connected: %s (%s)\n", WiFi.SSID().c_str(),
+                    WiFi.localIP().toString().c_str());
+      s_wifiPhase = WIFI_IDLE;
       if (claudeHasToken()) requestFetch();
     } else {
       Serial.println("WiFi lost");
+      s_wifiPhase = WIFI_IDLE;
+      s_wifiPhaseMs = millis();
     }
   }
-  if (!up && millis() - s_wifiAttemptMs > 15000) {
-    WiFi.disconnect();
-    wifiBegin();
+  if (up) return;
+
+  switch (s_wifiPhase) {
+    case WIFI_CONNECTING:
+      if (millis() - s_wifiPhaseMs > WIFI_TIMEOUT_MS) {
+        Serial.println("WiFi: connect timed out, rescanning");
+        WiFi.disconnect();
+        s_wifiPhase = WIFI_IDLE;
+        s_wifiPhaseMs = millis();
+      }
+      break;
+    case WIFI_IDLE:
+    default:
+      if (millis() - s_wifiPhaseMs > WIFI_RESCAN_GAP_MS) wifiScanAndConnect();
+      break;
   }
 }
 
