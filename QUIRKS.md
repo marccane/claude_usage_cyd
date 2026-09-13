@@ -76,8 +76,8 @@ date -d @$(( $(jq .claudeAiOauth.expiresAt ~/.claude/.credentials.json) / 1000 )
 
 Other OAuth payload differences that the firmware has to tolerate: no org id
 (the endpoint is account-scoped, so skip org resolution), no `/rate_limits`, and
-`extra_usage.monthly_limit` is `null` — there is no budget total to render, only
-the amount used.
+`extra_usage.monthly_limit` is `null` — see §5 for the fallback scale the bar
+uses instead.
 
 ---
 
@@ -142,13 +142,48 @@ suspect the newly-reachable code, not only the fix.
 
 ---
 
-## 5. Serial protocol quirks
+## 5. ⚠ ArduinoJson's `| default` silently swallows type mismatches
+
+`variant | fallback` returns the fallback unless the stored value **is already
+that type**. It is not a cast. So an integer default applied to a JSON float
+quietly yields the default, with no error anywhere:
+
+```json
+"used_credits": 1859.0        // parsed as a float, because of the ".0"
+```
+```c
+out.extra.used = (float)(ex["used_credits"] | 0) / 100.0f;  // WRONG -> 0.00
+out.extra.used = (ex["used_credits"] | 0.0f) / 100.0f;      // right -> 18.59
+```
+
+The cast on the outside is a decoy: the `| 0` has already thrown the value away
+before the `(float)` ever runs. This is why the extra-usage bar sat at 0 % for
+so long while the API was reporting real spend the whole time — it looked like
+"we have no credit data" when it was really "we asked for the wrong type".
+
+**Rule: match the default's type to the JSON's type.** Use `| 0.0f` for anything
+the API might send with a decimal point, and be suspicious of any `| 0` reading
+a money or percentage field. A value that is `0` when you expect data, with no
+parse error, is the signature of this bug.
+
+**The credit bar's scale.** Neither endpoint reports `extra_usage.monthly_limit`
+— it is `null` on the oauth API *and* on claude.ai — so there is no real budget
+to fill a bar against. `EXTRA_CREDITS_FALLBACK` in `include/config.h` supplies
+one (currently `100.0f`, i.e. 100 in whatever currency the payload names). A
+real `monthly_limit` still wins if the API ever starts sending one. Note the PC
+script has its own, *different* hardcoded figure (`TOTAL_CREDITS = 4000`, i.e.
+40), so `claudeUsageWatch` and the display will disagree on the percentage until
+one of them is changed.
+
+---
+
+## 6. Serial protocol quirks
 
 | PC sends | CYD replies |
 |---|---|
 | `PING` | `PONG claude-cyd 1.0` |
 | `TOKEN <base64>` | `OK TOKEN <bytes>` / `ERR <reason>` |
-| `STATUS` | `STATUS wifi=1 ip=… org=… last=ok fetching=0` |
+| `STATUS` | `STATUS wifi=1 ip=… org=… last=ok fetching=0 http=200 thr=0 extra=18.59/100.00(19%) err=-` |
 | `REFRESH` | `OK REFRESH` |
 
 - **Opening the port resets the board** (RTS). Every probe therefore reboots the
@@ -175,7 +210,7 @@ suspect the newly-reachable code, not only the fix.
 
 ---
 
-## 6. `secrets.h` is git-ignored, so its format changes bite silently
+## 7. `secrets.h` is git-ignored, so its format changes bite silently
 
 `secrets.h` moved from a single `WIFI_SSID`/`WIFI_PASS` pair to a `WIFI_CREDS[]`
 list (multi-AP, strongest-signal-wins). Because the real file is git-ignored,
@@ -193,7 +228,7 @@ the commit message, because nobody's local file follows automatically.
 
 ---
 
-## 7. Debugging recipes
+## 8. Debugging recipes
 
 **Decode a Guru Meditation backtrace.** Copy the `Backtrace:` addresses and run
 them against the ELF that produced them (check `ELF file SHA256` in the panic
@@ -207,13 +242,13 @@ matches your build):
 That turned an opaque `LoadProhibited` into `ui.cpp:347` in one step.
 
 **Watch without rebooting in a loop.** Open the port once, sleep past the boot,
-then poll — see §5. Reconnecting per sample resets the board every time.
+then poll — see §6. Reconnecting per sample resets the board every time.
 
 **Prove auth separately from rendering.** Hit the endpoint from the PC with the
 same headers the device uses. If the PC gets `200` and the device does not, it's
 the device; if both get `429`, it's the account budget and you just have to wait.
 
-**Don't trust a single `STATUS` after a push.** See the race in §5.
+**Don't trust a single `STATUS` after a push.** See the race in §6.
 
 **Force an HTTP error without burning API quota.** The firmware uses `base_url`
 verbatim, so you can point it at a local server that returns whatever you want
@@ -232,7 +267,7 @@ than waiting for the real endpoint to rate-limit you, and it costs no quota.
 
 ---
 
-## 8. Miscellaneous
+## 9. Miscellaneous
 
 - Time is UTC (`configTime(0, 0, …)`); `resets_at` maths depends on it, and
   `resetInSeconds()` returns `-1` until the clock syncs (`now < 1700000000`).

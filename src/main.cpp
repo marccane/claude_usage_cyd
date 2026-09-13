@@ -212,7 +212,8 @@ static void handleLine(String line) {
     }
 
   } else if (line.startsWith("STATUS")) {
-    Serial.printf("STATUS wifi=%d ip=%s org=%s last=%s fetching=%d http=%d thr=%d err=%s\n",
+    Serial.printf("STATUS wifi=%d ip=%s org=%s last=%s fetching=%d http=%d thr=%d "
+                  "extra=%.2f/%.2f(%.0f%%) err=%s\n",
                   WiFi.status() == WL_CONNECTED ? 1 : 0,
                   WiFi.localIP().toString().c_str(),
                   claudeOrgName(),
@@ -220,6 +221,7 @@ static void handleLine(String line) {
                   g_fetching ? 1 : 0,
                   g_result.http_status,
                   g_result.throttled ? 1 : 0,
+                  g_result.extra.used, g_result.extra.total, g_result.extra.util,
                   g_result.error[0] ? g_result.error : "-");
 
   } else if (line.startsWith("REFRESH")) {

@@ -248,9 +248,11 @@ bool claudeFetch(UsageData &out) {
       out.extra.enabled = true;
       out.extra.util = ex["utilization"] | -1.0f;
       if (!ex["used_credits"].isNull())
-        out.extra.used = (float)(ex["used_credits"] | 0) / 100.0f;
+        out.extra.used = (ex["used_credits"] | 0.0f) / 100.0f;
       if (!ex["monthly_limit"].isNull())
-        out.extra.total = (float)(ex["monthly_limit"] | 0) / 100.0f;
+        out.extra.total = (ex["monthly_limit"] | 0.0f) / 100.0f;
+      else
+        out.extra.total = EXTRA_CREDITS_FALLBACK;  // oauth reports null; assume a budget
       strncpy(out.extra.currency, ex["currency"] | "", sizeof(out.extra.currency) - 1);
       if (out.extra.util < 0 && out.extra.used >= 0 && out.extra.total > 0)
         out.extra.util = out.extra.used / out.extra.total * 100.0f;

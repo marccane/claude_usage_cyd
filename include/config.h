@@ -57,3 +57,9 @@
 // Colour thresholds mirror claude_usage.py's bar(): <60 green, <85 amber, else red.
 #define PCT_AMBER 60.0f
 #define PCT_RED 85.0f
+
+// Credit budget to assume when the API doesn't report one. The oauth /usage
+// endpoint returns extra_usage.monthly_limit=null, which leaves the extra-usage
+// bar with no scale to fill against. A real monthly_limit from the API always
+// wins over this. Currency comes from the payload, not from here.
+#define EXTRA_CREDITS_FALLBACK 100.0f
