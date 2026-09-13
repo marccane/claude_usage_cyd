@@ -57,6 +57,17 @@ how a genuine 200 window got burned through in seconds (see §4).
 
 The cookie path talks to claude.ai instead and is not subject to this.
 
+**How the device reacts (branch `claude-code-token`).** A 429 carries no new
+figures, so blanking the screen would throw away good data for a transient
+condition. Instead `loop()` keeps the previous `UsageData` and only sets
+`throttled`, so the bars stay put; the header gains an orange ` - Throttled`
+after the org name, and the RGB LED goes amber. The *Updated:* timestamp keeps
+showing the last **successful** fetch, which is the honest staleness signal. The
+flag clears automatically on the next good fetch. `STATUS` reports it as `thr=1`.
+
+Note the merge only kicks in when there is something to keep — a 429 with no
+prior valid result still shows the error screen.
+
 Check how long the OAuth token has left:
 
 ```bash
@@ -203,6 +214,21 @@ same headers the device uses. If the PC gets `200` and the device does not, it's
 the device; if both get `429`, it's the account budget and you just have to wait.
 
 **Don't trust a single `STATUS` after a push.** See the race in §5.
+
+**Force an HTTP error without burning API quota.** The firmware uses `base_url`
+verbatim, so you can point it at a local server that returns whatever you want
+to test. It must speak **TLS** (the client is a `WiFiClientSecure`), but a
+self-signed cert is fine because cert validation is off:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem \
+        -days 2 -subj "/CN=<pc-ip>"
+# serve 429 on :8443, then push a blob with base_url = https://<pc-ip>:8443
+```
+
+That is how the throttle handling above was verified end to end: real fetch →
+fake 429 (figures kept, `thr=1`) → real blob restored (`thr=0`). Much better
+than waiting for the real endpoint to rate-limit you, and it costs no quota.
 
 ---
 

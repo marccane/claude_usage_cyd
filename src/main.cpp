@@ -212,13 +212,14 @@ static void handleLine(String line) {
     }
 
   } else if (line.startsWith("STATUS")) {
-    Serial.printf("STATUS wifi=%d ip=%s org=%s last=%s fetching=%d http=%d err=%s\n",
+    Serial.printf("STATUS wifi=%d ip=%s org=%s last=%s fetching=%d http=%d thr=%d err=%s\n",
                   WiFi.status() == WL_CONNECTED ? 1 : 0,
                   WiFi.localIP().toString().c_str(),
                   claudeOrgName(),
                   g_result.valid ? "ok" : (g_result.error[0] ? "err" : "never"),
                   g_fetching ? 1 : 0,
                   g_result.http_status,
+                  g_result.throttled ? 1 : 0,
                   g_result.error[0] ? g_result.error : "-");
 
   } else if (line.startsWith("REFRESH")) {
@@ -280,9 +281,18 @@ void loop() {
   // Apply a completed background fetch to the UI (LVGL touched only here).
   if (g_resultReady) {
     g_resultReady = false;
-    g_result = g_pending;
+    if (g_pending.http_status == 429 && g_result.valid) {
+      // Rate limited: the API tells us nothing new, so keep the last good
+      // figures on screen and just mark them stale instead of blanking the UI.
+      g_result.throttled = true;
+      g_result.http_status = g_pending.http_status;
+      strncpy(g_result.error, g_pending.error, sizeof(g_result.error) - 1);
+    } else {
+      g_result = g_pending;
+    }
     uiUpdate(g_result);
-    setLed(!g_result.valid, g_result.valid, false);  // green ok / red error
+    // green ok / amber throttled (stale but usable) / red error
+    setLed(!g_result.valid || g_result.throttled, g_result.valid, false);
     uiSetNet(WiFi.status() == WL_CONNECTED, WiFi.localIP().toString());
   }
 

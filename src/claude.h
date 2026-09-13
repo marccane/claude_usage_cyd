@@ -27,6 +27,7 @@ struct RateLimit {
 
 struct UsageData {
   bool valid = false;
+  bool throttled = false;    // last fetch was rate-limited; figures below are stale
   char name[40] = "";
   char org_name[48] = "";
   UsageWindow five_hour, seven_day, opus, sonnet;

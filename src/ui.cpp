@@ -101,6 +101,26 @@ static void fmtReset(long s, char *out, size_t n) {
   }
 }
 
+// ---- header ------------------------------------------------------------------
+// Kept in statics so the throttle marker can be recoloured when the theme flips
+// without waiting for the next fetch.
+static char s_hdr_name[40] = "";
+static char s_hdr_org[48] = "";
+static bool s_hdr_throttled = false;
+
+static void refreshHeader() {
+  if (!lbl_header || (!s_hdr_name[0] && !s_hdr_org[0])) return;  // nothing fetched yet
+  const char *nm = s_hdr_name[0] ? s_hdr_name : "?";
+  const char *org = s_hdr_org[0] ? s_hdr_org : "?";
+  char buf[128];
+  if (s_hdr_throttled)  // "#RRGGBB text#" is LVGL's recolor markup
+    snprintf(buf, sizeof(buf), "%s  -  %s  #%06X - Throttled#", nm, org,
+             s_dark ? 0xFFB000 : 0xC75B00);
+  else
+    snprintf(buf, sizeof(buf), "%s  -  %s", nm, org);
+  lv_label_set_text(lbl_header, buf);
+}
+
 // ---- theming ----------------------------------------------------------------
 static void applyTheme(bool dark) {
   lv_color_t bg = dark ? lv_color_hex(0x15151A) : lv_color_white();
@@ -138,6 +158,8 @@ static void applyTheme(bool dark) {
   // Accent / dim labels (local styles override the shared text style).
   if (lbl_state) lv_obj_set_style_text_color(lbl_state, accent, 0);
   if (lbl_fw) lv_obj_set_style_text_color(lbl_fw, dim, 0);
+
+  refreshHeader();  // the throttle marker carries a baked-in hex colour
 }
 
 // ---- event callbacks --------------------------------------------------------
@@ -235,6 +257,7 @@ static void buildUsageTab(lv_obj_t *tab) {
   lbl_header = lv_label_create(tab);
   lv_obj_set_style_text_font(lbl_header, &lv_font_montserrat_14, 0);
   styleText(lbl_header);
+  lv_label_set_recolor(lbl_header, true);  // for the "- Throttled" marker
   lv_label_set_text(lbl_header, "Claude.ai usage");
 
   m_five = makeMeter(tab, "5-hour");
@@ -332,9 +355,12 @@ void uiInit() {
 }
 
 void uiUpdate(const UsageData &d) {
-  if (d.org_name[0] || d.name[0])
-    lv_label_set_text_fmt(lbl_header, "%s  -  %s", d.name[0] ? d.name : "?",
-                          d.org_name[0] ? d.org_name : "?");
+  if (d.org_name[0] || d.name[0]) {
+    strncpy(s_hdr_name, d.name, sizeof(s_hdr_name) - 1);
+    strncpy(s_hdr_org, d.org_name, sizeof(s_hdr_org) - 1);
+  }
+  s_hdr_throttled = d.throttled;
+  refreshHeader();
 
   setMeter(m_five, d.five_hour.present, d.five_hour.util, d.five_hour.resets_in);
   setMeter(m_seven, d.seven_day.present, d.seven_day.util, d.seven_day.resets_in);
