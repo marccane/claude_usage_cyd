@@ -2,10 +2,15 @@
 """
 claude_token_push.py — show the Claude.ai auth blob and push it to the CYD.
 
-This is the "update the token from the PC" half. It extracts the working
-Firefox cookies (via claude_token_export.py), prints a human-readable summary
-to the screen, and — with --serial — sends the blob to the ESP32/CYD over USB
-so the firmware can refresh its stored token without re-flashing.
+This is the "update the token from the PC" half. It extracts an auth blob (via
+claude_token_export.py) — from the logged-in Claude Code session by default, or
+from the Firefox cookies with `browser` — prints a human-readable summary to
+the screen, and — with --serial — sends the blob to the ESP32/CYD over USB so
+the firmware can refresh its stored token without re-flashing.
+
+Note: the Claude Code OAuth token expires ~8 h after the CLI last refreshed
+it, so the CYD needs a re-push after that; the browser cookie blob lives
+longer but needs Cloudflare cookies. Pick your poison.
 
 Serial line protocol (newline-delimited, 115200 baud):
     ->  PING
@@ -19,11 +24,12 @@ Serial line protocol (newline-delimited, 115200 baud):
 
 Usage:
     claude_token_push.py                  # just print the blob + summary (no device)
+    claude_token_push.py browser          # use Firefox cookies instead of Claude Code
     claude_token_push.py --serial         # autodetect CYD port and push
     claude_token_push.py --serial /dev/ttyUSB0
     claude_token_push.py --serial --status   # push, then query device status
     claude_token_push.py --serial --refresh  # push, then trigger an immediate fetch
-    claude_token_push.py --full           # ship every claude.ai cookie (default: essential)
+    claude_token_push.py browser --full   # ship every claude.ai cookie (default: essential)
     claude_token_push.py --baud 115200
 
 DEPENDS: claude_token_export.py (same dir), pyserial
@@ -137,20 +143,25 @@ def push_serial(blob: dict, port: str, baud: int,
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("source", nargs="?", choices=("code", "browser"), default="code",
+                    help="token source: Claude Code session or Firefox cookies "
+                         "(default: %(default)s)")
     ap.add_argument("--serial", nargs="?", const="AUTO", metavar="PORT",
                     help="push to the CYD (autodetect port if none given)")
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--full", action="store_true",
-                    help="ship every claude.ai cookie (default: essential set only)")
+                    help="browser source only: ship every claude.ai cookie "
+                         "(default: essential set only)")
     ap.add_argument("--no-verify", dest="verify", action="store_false",
-                    help="skip the live /account + /usage check before pushing")
+                    help="skip the live API check before pushing")
     ap.add_argument("--status", action="store_true", help="query device status after push")
     ap.add_argument("--refresh", action="store_true",
                     help="trigger an immediate API fetch on the device after push")
     args = ap.parse_args()
 
     try:
-        blob = exporter.build_blob(verify=args.verify, essential_only=not args.full)
+        blob = exporter.build_blob(source=args.source, verify=args.verify,
+                                   essential_only=not args.full)
     except Exception as e:
         print(f"Error extracting token: {e}", file=sys.stderr)
         sys.exit(1)

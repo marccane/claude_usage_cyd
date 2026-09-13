@@ -127,7 +127,7 @@ static void handleLine(String line) {
       uiSetState("Token updated");
       requestFetch();
     } else {
-      Serial.println("ERR invalid blob (need cookie + user_agent)");
+      Serial.println("ERR invalid blob (need user_agent + cookie or token)");
     }
 
   } else if (line.startsWith("STATUS")) {

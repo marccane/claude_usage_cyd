@@ -2,35 +2,53 @@
 """
 claude_token_export.py — extract the minimal Claude.ai auth blob for the ESP32/CYD.
 
-The CYD (Cheap Yellow Display) has no access to the Firefox cookie DB, so this
-pulls the *working* claude.ai cookies (sessionKey + Cloudflare cf_clearance/
-__cf_bm + friends), resolves the team org id, verifies the blob actually works
-against the API, and emits a compact JSON object the firmware stores in NVS.
+The CYD (Cheap Yellow Display) can't read local credentials itself, so this
+builds a compact JSON "blob" the firmware stores in NVS. Two token sources
+(positional arg, default "code"):
 
-It deliberately reuses the same cookie-reading approach as claude_usage.py — the
-cookies that make that script work are exactly the ones the ESP32 needs.
+  code     OAuth token of the logged-in Claude Code session
+           (~/.claude/.credentials.json). Small blob, no Cloudflare cookies —
+           BUT the access token expires ~8 h after Claude Code last refreshed
+           it, so the CYD needs a re-push after that.
+  browser  the *working* claude.ai Firefox cookies (sessionKey + Cloudflare
+           cf_clearance/__cf_bm + friends), same approach as claude_usage.py.
 
 Blob schema (compact JSON):
-  {
-    "base_url":   "https://claude.ai/api",
-    "user_agent": "Mozilla/5.0 (... Firefox/138.0)",
-    "cookie":     "sessionKey=...; cf_clearance=...; __cf_bm=...; ...",
-    "org_id":     "<uuid>",
-    "org_name":   "Acme Inc",
-    "name":       "Ada",
-    "exported_at":"2026-06-15T12:00:00+00:00"
-  }
+  cookie source:
+    {
+      "auth":       "cookie",
+      "base_url":   "https://claude.ai/api",
+      "user_agent": "Mozilla/5.0 (... Firefox/138.0)",
+      "cookie":     "sessionKey=...; cf_clearance=...; __cf_bm=...; ...",
+      "org_id":     "<uuid>",
+      "org_name":   "Acme Inc",
+      "name":       "Ada",
+      "exported_at":"2026-06-15T12:00:00+00:00"
+    }
+  oauth source ("code"):
+    {
+      "auth":       "oauth",
+      "base_url":   "https://api.anthropic.com/api",
+      "user_agent": "claude-cli/2.0.0 (external)",
+      "token":      "sk-ant-oat01-...",
+      "org_id":     "",
+      "org_name":   "Acme Inc",
+      "name":       "Ada",
+      "expires_at": "2026-06-15T20:00:00+00:00",
+      "exported_at":"2026-06-15T12:00:00+00:00"
+    }
 
 Usage:
-  claude_token_export.py                 # pretty summary + the compact JSON
+  claude_token_export.py                 # Claude Code token, summary + JSON
+  claude_token_export.py browser         # Firefox cookies instead
   claude_token_export.py --json          # ONLY the compact JSON (one line)
   claude_token_export.py --base64        # base64(JSON) — exactly what gets pushed
   claude_token_export.py -o blob.json    # write compact JSON to a file
   claude_token_export.py --no-verify     # skip the live API check
-  claude_token_export.py --essential     # only ship cookies the API truly needs
+  claude_token_export.py --essential     # browser only: ship only needed cookies
 
 CALLERS: claude_token_push.py, ~/.aliases (optional)
-SEE ALSO: claude_usage.py (the original Firefox-only viewer)
+SEE ALSO: claude_usage.py (the PC viewer, same two token sources)
 """
 
 import argparse
@@ -47,6 +65,12 @@ import urllib.request
 import urllib.error
 
 CLAUDE_API = "https://claude.ai/api"
+ANTHROPIC_API = "https://api.anthropic.com/api"
+CREDENTIALS_FILE = Path.home() / ".claude" / ".credentials.json"
+
+# UA for the oauth blob. api.anthropic.com has no cookie-bound bot check, so
+# this just needs to look like a legitimate client.
+OAUTH_USER_AGENT = "claude-cli/2.0.0 (external)"
 
 # Must match a User-Agent that Cloudflare has already issued cf_clearance for.
 # cf_clearance is bound to IP + UA (and sometimes TLS fingerprint); the ESP32 has
@@ -109,8 +133,35 @@ def get_claude_cookies(db_path: Path, essential_only: bool = False) -> str:
         tmp_path.unlink(missing_ok=True)
 
 
-def get_json(url: str, cookie_header: str) -> dict:
-    req = urllib.request.Request(url, headers={**HEADERS, "Cookie": cookie_header})
+def get_oauth_creds() -> dict:
+    """Read the Claude Code session token from ~/.claude/.credentials.json."""
+    try:
+        creds = json.loads(CREDENTIALS_FILE.read_text())["claudeAiOauth"]
+    except (OSError, KeyError, json.JSONDecodeError) as e:
+        raise RuntimeError(
+            f"No Claude Code credentials in {CREDENTIALS_FILE} — "
+            "log in with `claude`, or use the browser source"
+        ) from e
+    expires_at = datetime.fromtimestamp(creds.get("expiresAt", 0) / 1000, timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
+        raise RuntimeError(
+            "Claude Code OAuth token expired — run `claude` to refresh it, "
+            "or use the browser source"
+        )
+    return creds
+
+
+def oauth_headers(token: str) -> dict:
+    return {
+        "User-Agent": OAUTH_USER_AGENT,
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": "oauth-2025-04-20",
+    }
+
+
+def get_json(url: str, headers: dict) -> dict:
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
@@ -133,30 +184,60 @@ def select_team_org(memberships: list) -> dict:
     return matches[0]["organization"]
 
 
-def build_blob(verify: bool = True, essential_only: bool = False) -> dict:
+def build_blob(source: str = "code", verify: bool = True,
+               essential_only: bool = False) -> dict:
     """Extract everything the ESP32 needs to fetch usage on its own."""
-    db = find_firefox_cookies()
-    cookie = get_claude_cookies(db, essential_only=essential_only)
+    if source == "browser":
+        db = find_firefox_cookies()
+        cookie = get_claude_cookies(db, essential_only=essential_only)
+        headers = {**HEADERS, "Cookie": cookie}
 
-    org_id = ""
+        org_id = ""
+        org_name = ""
+        name = ""
+        if verify:
+            account = get_json(f"{CLAUDE_API}/account", headers)
+            org = select_team_org(account["memberships"])
+            org_id = org["uuid"]
+            org_name = org["name"]
+            name = account.get("display_name") or account.get("full_name", "") or ""
+            # Prove the blob can actually reach the usage endpoint before we ship it.
+            get_json(f"{CLAUDE_API}/organizations/{org_id}/usage", headers)
+
+        return {
+            "auth": "cookie",
+            "base_url": CLAUDE_API,
+            "user_agent": USER_AGENT,
+            "cookie": cookie,
+            "org_id": org_id,
+            "org_name": org_name,
+            "name": name,
+            "exported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+
+    creds = get_oauth_creds()
+    headers = oauth_headers(creds["accessToken"])
+    expires_at = datetime.fromtimestamp(creds["expiresAt"] / 1000, timezone.utc)
+
     org_name = ""
     name = ""
     if verify:
-        account = get_json(f"{CLAUDE_API}/account", cookie)
-        org = select_team_org(account["memberships"])
-        org_id = org["uuid"]
-        org_name = org["name"]
+        profile = get_json(f"{ANTHROPIC_API}/oauth/profile", headers)
+        account = profile["account"]
+        org_name = profile["organization"]["name"]
         name = account.get("display_name") or account.get("full_name", "") or ""
         # Prove the blob can actually reach the usage endpoint before we ship it.
-        get_json(f"{CLAUDE_API}/organizations/{org_id}/usage", cookie)
+        get_json(f"{ANTHROPIC_API}/oauth/usage", headers)
 
     return {
-        "base_url": CLAUDE_API,
-        "user_agent": USER_AGENT,
-        "cookie": cookie,
-        "org_id": org_id,
+        "auth": "oauth",
+        "base_url": ANTHROPIC_API,
+        "user_agent": OAUTH_USER_AGENT,
+        "token": creds["accessToken"],
+        "org_id": "",
         "org_name": org_name,
         "name": name,
+        "expires_at": expires_at.isoformat(timespec="seconds"),
         "exported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 
@@ -178,18 +259,29 @@ def _redact(cookie: str) -> str:
     return "; ".join(out)
 
 
+def _fmt_expiry(iso: str) -> str:
+    left = datetime.fromisoformat(iso) - datetime.now(timezone.utc)
+    h, rem = divmod(int(left.total_seconds()), 3600)
+    return f"{iso}  (in {h}h {rem // 60}m — re-push after that!)"
+
+
 def print_summary(blob: dict) -> None:
     j = blob_json(blob)
     b64 = blob_base64(blob)
     print(f"\n{'─'*60}")
-    print("  Claude.ai → CYD auth blob")
+    print(f"  Claude.ai → CYD auth blob   [{blob['auth']}]")
     print(f"{'─'*60}")
     print(f"  User      : {blob['name'] or '(unverified)'}")
     print(f"  Org       : {blob['org_name'] or '(unverified)'}")
-    print(f"  Org ID    : {blob['org_id'] or '(unverified)'}")
+    if blob["auth"] == "oauth":
+        t = blob["token"]
+        print(f"  Token     : {t[:15]}…({len(t)})")
+        print(f"  Expires   : {_fmt_expiry(blob['expires_at'])}")
+    else:
+        print(f"  Org ID    : {blob['org_id'] or '(unverified)'}")
+        print(f"  Cookies   : {_redact(blob['cookie'])}")
     print(f"  Base URL  : {blob['base_url']}")
     print(f"  User-Agent: {blob['user_agent']}")
-    print(f"  Cookies   : {_redact(blob['cookie'])}")
     print(f"  JSON size : {len(j)} bytes   (NVS string limit ≈ 4000)")
     print(f"  Exported  : {blob['exported_at']}")
     print(f"{'─'*60}")
@@ -203,18 +295,22 @@ def print_summary(blob: dict) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("source", nargs="?", choices=("code", "browser"), default="code",
+                    help="token source: Claude Code session or Firefox cookies "
+                         "(default: %(default)s)")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--json", action="store_true", help="print only the compact JSON")
     g.add_argument("--base64", action="store_true", help="print only base64(JSON)")
     ap.add_argument("-o", "--out", metavar="FILE", help="write compact JSON to FILE")
     ap.add_argument("--no-verify", dest="verify", action="store_false",
-                    help="skip the live /account + /usage check")
+                    help="skip the live API check")
     ap.add_argument("--essential", action="store_true",
-                    help="ship only the cookies the API needs (smaller blob)")
+                    help="browser source only: ship only the cookies the API needs")
     args = ap.parse_args()
 
     try:
-        blob = build_blob(verify=args.verify, essential_only=args.essential)
+        blob = build_blob(source=args.source, verify=args.verify,
+                          essential_only=args.essential)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

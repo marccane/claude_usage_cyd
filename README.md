@@ -4,44 +4,51 @@ Shows your Claude.ai usage (the same data as `claudeUsageWatch` / `claude_usage.
 on a **CYD** (Cheap Yellow Display, ESP32-2432S028) with an LVGL UI and touch.
 
 ```
-   PC (Firefox logged in)                          CYD (ESP32 + 2.8" LCD)
+   PC (Claude Code / Firefox)                      CYD (ESP32 + 2.8" LCD)
  ┌──────────────────────────┐                   ┌───────────────────────────┐
  │ claude_token_export.py   │   USB serial      │  stores blob in NVS        │
- │  reads cookies.sqlite ───┼── TOKEN <b64> ───►│  fetches /usage over HTTPS │
+ │  reads token/cookies ────┼── TOKEN <b64> ───►│  fetches /usage over HTTPS │
  │ claude_token_push.py     │                   │  draws LVGL bars + touch   │
  └──────────────────────────┘                   └───────────────────────────┘
 ```
 
-The ESP32 has no access to the Firefox cookie DB, so the PC extracts the working
-session cookies into a small JSON "blob" and pushes it over USB. The CYD then
-calls `claude.ai/api` itself (**direct mode**) and renders the result.
+The ESP32 has no access to local credentials, so the PC extracts an auth "blob"
+(compact JSON) and pushes it over USB. The CYD then calls the API itself
+(**direct mode**) and renders the result. Two token sources:
+
+- **`code`** (default) — the OAuth token of the logged-in Claude Code session
+  (`~/.claude/.credentials.json`). Small blob, no Cloudflare hassle; the CYD
+  talks to `api.anthropic.com/api/oauth/usage` with a Bearer token. **Expires
+  ~8 h** after Claude Code last refreshed it → re-push after that.
+- **`browser`** — the working `claude.ai` Firefox cookies (sessionKey +
+  Cloudflare `cf_clearance`/`__cf_bm`), same logic as `claude_usage.py`. Lives
+  longer, but Cloudflare cookies rot and can 403.
 
 ---
 
 ## Part 1 — PC scripts (`~/.scripts/`)
 
-Both reuse the cookie logic from `claude_usage.py`.
-
 ### `claude_token_export.py` — make the auth blob
-Reads the working `claude.ai` cookies (sessionKey + Cloudflare `cf_clearance`/
-`__cf_bm`), resolves the team org id, verifies it against the live API, and emits
-a compact JSON blob.
+Reads the Claude Code token (or the `claude.ai` cookies with `browser`),
+verifies it against the live API, and emits a compact JSON blob.
 
 ```bash
-claude_token_export.py            # pretty summary + base64 payload
+claude_token_export.py            # Claude Code token: summary + base64 payload
+claude_token_export.py browser    # Firefox cookies instead
 claude_token_export.py --json     # one-line compact JSON
 claude_token_export.py --base64   # base64(JSON) — exactly what gets pushed
-claude_token_export.py --essential# only the cookies the API needs (~1.2 KB, default for push)
+claude_token_export.py browser --essential  # only the cookies the API needs (~1.2 KB, default for push)
 ```
 
 ### `claude_token_push.py` — show it / push it to the CYD
 ```bash
 claude_token_push.py                  # just print the blob (no device)
+claude_token_push.py browser          # use Firefox cookies instead of Claude Code
 claude_token_push.py --serial         # autodetect the CYD port and push
 claude_token_push.py --serial /dev/ttyUSB0
 claude_token_push.py --serial --refresh   # push, then force an immediate fetch
 claude_token_push.py --serial --status    # push, then read device status
-claude_token_push.py --full           # ship every cookie (if --essential gets 403)
+claude_token_push.py browser --full   # ship every cookie (if --essential gets 403)
 ```
 
 Serial protocol (115200 baud, newline-delimited):
@@ -53,8 +60,9 @@ Serial protocol (115200 baud, newline-delimited):
 | `STATUS`            | `STATUS wifi=1 ip=… org=… last=ok fetching=0`  |
 | `REFRESH`           | `OK REFRESH`                                    |
 
-> The session cookie is long-lived; `cf_clearance`/`__cf_bm` are not. Re-run the
-> push whenever the device starts showing `HTTP 403`. A handy alias:
+> `code` blobs die when the OAuth token expires (~8 h); `browser` blobs die when
+> Cloudflare rotates `cf_clearance`/`__cf_bm`. Either way: re-run the push
+> whenever the device starts showing `HTTP 401/403`. A handy alias:
 > ```bash
 > alias claudeCydPush='claude_token_push.py --serial --refresh'
 > ```

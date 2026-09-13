@@ -1,7 +1,12 @@
 // claude.cpp — stores the pushed auth blob in NVS and fetches usage/limits.
 //
-// The blob is the compact JSON produced by claude_token_export.py on the PC:
-//   {base_url, user_agent, cookie, org_id, org_name, name, exported_at}
+// The blob is the compact JSON produced by claude_token_export.py on the PC.
+// Two variants, selected by "auth" (absent = "cookie", for old stored blobs):
+//   cookie: {auth, base_url, user_agent, cookie, org_id, org_name, name, ...}
+//           claude.ai web API, Cookie-header auth, org-scoped endpoints
+//   oauth:  {auth, base_url, user_agent, token, org_name, name, expires_at, ...}
+//           api.anthropic.com, Bearer-token auth (Claude Code session token),
+//           /oauth/usage endpoint — no org id and no rate_limits
 // We keep the raw JSON in NVS and re-parse it on boot.
 #include <Arduino.h>
 #include <HTTPClient.h>
@@ -16,9 +21,11 @@
 
 // ---- in-memory config (parsed from the blob) -------------------------------
 static bool s_loaded = false;
+static bool s_oauth = false;  // true = Bearer token (Claude Code), false = cookies
 static String s_baseUrl;
 static String s_userAgent;
 static String s_cookie;
+static String s_token;
 static String s_orgId;
 static String s_orgName;
 static String s_userName;
@@ -31,15 +38,23 @@ static bool parseBlobInto(const String &json) {
     Serial.printf("blob parse error: %s\n", err.c_str());
     return false;
   }
-  const char *cookie = doc["cookie"] | "";
   const char *ua = doc["user_agent"] | "";
-  if (strlen(cookie) == 0 || ua == nullptr || strlen(ua) == 0) {
-    Serial.println("blob missing cookie/user_agent");
+  if (strlen(ua) == 0) {
+    Serial.println("blob missing user_agent");
+    return false;
+  }
+  s_oauth = strcmp(doc["auth"] | "cookie", "oauth") == 0;
+  const char *cookie = doc["cookie"] | "";
+  const char *token = doc["token"] | "";
+  if (s_oauth ? strlen(token) == 0 : strlen(cookie) == 0) {
+    Serial.println(s_oauth ? "blob missing token" : "blob missing cookie");
     return false;
   }
   s_cookie = cookie;
+  s_token = token;
   s_userAgent = ua;
-  s_baseUrl = doc["base_url"] | "https://claude.ai/api";
+  s_baseUrl = doc["base_url"] | (s_oauth ? "https://api.anthropic.com/api"
+                                         : "https://claude.ai/api");
   s_orgId = doc["org_id"] | "";
   s_orgName = doc["org_name"] | "";
   s_userName = doc["name"] | "";
@@ -104,10 +119,15 @@ static int httpGetJson(const String &url, String &body) {
   if (!http.begin(client, url)) return -1;
   http.setUserAgent(s_userAgent);
   http.addHeader("Accept", "application/json");
-  http.addHeader("Referer", "https://claude.ai/");
-  http.addHeader("Cookie", s_cookie);
-  const char *collect[] = {"Set-Cookie"};
-  http.collectHeaders(collect, 1);
+  if (s_oauth) {
+    http.addHeader("Authorization", "Bearer " + s_token);
+    http.addHeader("anthropic-beta", "oauth-2025-04-20");
+  } else {
+    http.addHeader("Referer", "https://claude.ai/");
+    http.addHeader("Cookie", s_cookie);
+    const char *collect[] = {"Set-Cookie"};
+    http.collectHeaders(collect, 1);
+  }
   http.setTimeout(15000);
 
   int code = http.GET();
@@ -164,8 +184,9 @@ bool claudeFetch(UsageData &out) {
   strncpy(out.org_name, s_orgName.c_str(), sizeof(out.org_name) - 1);
   strncpy(out.name, s_userName.c_str(), sizeof(out.name) - 1);
 
-  // Resolve org id if the PC didn't include one.
-  if (s_orgId.isEmpty()) {
+  // Resolve org id if the PC didn't include one (cookie auth only — the
+  // oauth endpoint is account-scoped and needs no org).
+  if (!s_oauth && s_orgId.isEmpty()) {
     String body;
     int code = httpGetJson(s_baseUrl + "/account", body);
     out.http_status = code;
@@ -198,12 +219,18 @@ bool claudeFetch(UsageData &out) {
   // ---- usage ----
   {
     String body;
-    int code = httpGetJson(s_baseUrl + "/organizations/" + s_orgId + "/usage", body);
+    String url = s_oauth ? s_baseUrl + "/oauth/usage"
+                         : s_baseUrl + "/organizations/" + s_orgId + "/usage";
+    int code = httpGetJson(url, body);
     out.http_status = code;
     if (code != 200) {
-      snprintf(out.error, sizeof(out.error),
-               code == 403 ? "usage HTTP 403 (Cloudflare? refresh token)" : "usage HTTP %d",
-               code);
+      const char *hint =
+          s_oauth ? ((code == 401 || code == 403)
+                         ? "usage HTTP %d (token expired? re-push)"
+                         : "usage HTTP %d")
+                  : (code == 403 ? "usage HTTP %d (Cloudflare? refresh token)"
+                                 : "usage HTTP %d");
+      snprintf(out.error, sizeof(out.error), hint, code);
       return false;
     }
     JsonDocument doc;
@@ -230,8 +257,8 @@ bool claudeFetch(UsageData &out) {
     }
   }
 
-  // ---- rate limits (non-fatal) ----
-  {
+  // ---- rate limits (non-fatal; the oauth API has no such endpoint) ----
+  if (!s_oauth) {
     String body;
     int code = httpGetJson(s_baseUrl + "/organizations/" + s_orgId + "/rate_limits", body);
     if (code == 200) {
