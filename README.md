@@ -22,6 +22,11 @@ calls `claude.ai/api` itself (**direct mode**) and renders the result.
 
 Both reuse the cookie logic from `claude_usage.py`.
 
+> Authenticating with the **Claude Code session token** instead of Firefox
+> cookies lives on the branch `claude-code-token`, deliberately kept off `main`.
+> The reasons and the traps (8 h expiry, a `429`-happy endpoint) are written up
+> in `~/.scripts/CLAUDE-TOKEN-SOURCES.md`.
+
 ### `claude_token_export.py` — make the auth blob
 Reads the working `claude.ai` cookies (sessionKey + Cloudflare `cf_clearance`/
 `__cf_bm`), resolves the team org id, verifies it against the live API, and emits
