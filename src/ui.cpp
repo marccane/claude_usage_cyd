@@ -343,9 +343,18 @@ void uiUpdate(const UsageData &d) {
 
   if (d.extra.enabled) {
     setMeter(m_extra, true, d.extra.util < 0 ? 0 : d.extra.util, -1);
-    if (d.extra.used >= 0)
-      lv_label_set_text_fmt(m_extra.info, "%.2f/%.2f %s", d.extra.used,
-                            d.extra.total, d.extra.currency);
+    if (d.extra.used >= 0) {
+      // LVGL's printf has no float support (LV_SPRINTF_USE_FLOAT defaults to
+      // 0), so a %f here leaves the doubles unconsumed and the following %s
+      // reads a bogus vararg -> LoadProhibited. Format with libc instead.
+      char buf[40];
+      if (d.extra.total > 0)
+        snprintf(buf, sizeof(buf), "%.2f/%.2f %s", d.extra.used, d.extra.total,
+                 d.extra.currency);
+      else  // oauth /usage reports monthly_limit=null: no total to show
+        snprintf(buf, sizeof(buf), "%.2f %s", d.extra.used, d.extra.currency);
+      lv_label_set_text(m_extra.info, buf);
+    }
   } else {
     setMeter(m_extra, false, 0, -1);
     lv_label_set_text(m_extra.info, "off");
