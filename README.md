@@ -28,6 +28,11 @@ The ESP32 has no access to local credentials, so the PC extracts an auth "blob"
 
 ## Part 1 — PC scripts (`~/.scripts/`)
 
+> This is the `claude-code-token` branch, which adds the Claude Code token
+> source; `main` stays browser-only on purpose. The reasoning and the traps
+> (8 h expiry, a `429`-happy endpoint) are written up in
+> `~/.scripts/CLAUDE-TOKEN-SOURCES.md`.
+
 ### `claude_token_export.py` — make the auth blob
 Reads the Claude Code token (or the `claude.ai` cookies with `browser`),
 verifies it against the live API, and emits a compact JSON blob.
