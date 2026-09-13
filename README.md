@@ -162,6 +162,10 @@ Easy next steps:
 
 ## Notes & caveats
 
+> See **[QUIRKS.md](QUIRKS.md)** for the full list of landmines: the two auth
+> sources and why `main` only has one, the OAuth rate limit, the LVGL `%f`
+> panic, serial-protocol races, and debugging recipes.
+
 - **Rate limit (`code`/oauth source):** `api.anthropic.com/api/oauth/usage` is
   rate-limited per account and answers `429` with `retry-after: ~195` once you
   lean on it. `REFRESH_MS` is 180 s, so the CYD polls *just* inside that window,
